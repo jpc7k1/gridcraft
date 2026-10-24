@@ -128,11 +128,46 @@ pub const DEFAULT_ROW_HEIGHT: f32 = 20.0;
 /// Width of a digit in the default font (Calibri 11) in 96-dpi pixels: the unit of column widths.
 pub const DEFAULT_DIGIT_WIDTH: f64 = 7.0;
 
+/// Column widths as Excel for Mac computes them (see [`set_mac_column_widths`]).
+static MAC_COLUMN_WIDTHS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Use Excel for Mac's column-width rule instead of Excel for Windows'. Observed in Excel for Mac
+/// 16.114: it measures the Normal font's digit in points (72 per inch) rounded to a whole point
+/// (Calibri 10 → 5, Calibri 11 and 12 → 6, Calibri 14 → 7, Arial 12 → 7), a stored width of `w`
+/// characters is `w` digits wide (rounded to a point, halves down), and a sheet's base width of
+/// 8 characters is 8 digits plus 5 points (53 pt for a 6-point digit). Excel for Windows counts
+/// 96-dpi pixels and rounds the default up to 8 pixels, so the same file draws about an eighth
+/// narrower there. The desktop app and the CLI turn this on on macOS; it is off otherwise.
+pub fn set_mac_column_widths(on: bool) {
+    MAC_COLUMN_WIDTHS.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether column widths follow Excel for Mac (see [`set_mac_column_widths`]).
+pub fn mac_column_widths() -> bool {
+    MAC_COLUMN_WIDTHS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Excel for Mac's digit width in points for a digit width `dw` returned by [`digit_width`].
+fn mac_digit_pt(dw: f64) -> f64 {
+    (dw * 0.75).round().max(1.0)
+}
+
+/// Excel for Mac rounds a column's width to a point, halves down (2.5 digits of 7 pt: 17 pt).
+fn mac_round(pt: f64) -> f64 {
+    (pt - 0.5).ceil().max(0.0)
+}
+
 /// Width of a digit of `font` in 96-dpi pixels, rounded as on screen: the unit Excel measures
 /// column widths in, taken from the workbook's Normal font. Calibri 11 gives 7, Calibri 12 gives
-/// 8, Arial 10 gives 7. Digit advances (as a share of the em) are the fonts' published metrics;
-/// other fonts are measured like Calibri.
+/// 8, Arial 10 gives 7. With Excel for Mac's rule ([`set_mac_column_widths`]) the digit is rounded
+/// to a whole point instead and returned in pixels (6 pt → 8 px, 5 pt → 6⅔ px). Digit advances
+/// (as a share of the em) are the fonts' published metrics; other fonts are measured like Calibri.
 pub fn digit_width(font: &crate::style::Font) -> f64 {
+    digit_width_for(font, mac_column_widths())
+}
+
+/// [`digit_width`] by Excel for Mac's rule (`mac`) or Excel for Windows'.
+pub(crate) fn digit_width_for(font: &crate::style::Font, mac: bool) -> f64 {
     let name = font.name.trim().to_ascii_lowercase();
     let em_share = match name.as_str() {
         "arial" | "helvetica" | "liberation sans" | "arimo" => 0.5562,
@@ -140,9 +175,16 @@ pub fn digit_width(font: &crate::style::Font) -> f64 {
         "courier new" | "courier" | "liberation mono" | "cousine" => 0.6001,
         "verdana" => 0.6362,
         "tahoma" => 0.5464,
+        "aptos" => 0.5342,
+        "garamond" => 0.4688,
+        "cambria" => 0.5537,
+        "century schoolbook" => 0.5562,
         _ => 0.5068,
     };
     let size = if font.size.is_finite() && font.size > 0.0 { f64::from(font.size).min(409.0) } else { 11.0 };
+    if mac {
+        return (size * em_share).round().clamp(1.0, 48.0) * 4.0 / 3.0;
+    }
     (size * 96.0 / 72.0 * em_share).round().clamp(1.0, 64.0)
 }
 
@@ -150,6 +192,11 @@ pub fn digit_width(font: &crate::style::Font) -> f64 {
 /// the cell padding: the value the Column Width dialog shows.
 pub fn points_to_chars(px: f64, dw: f64) -> f64 {
     let dw = if dw.is_finite() && dw >= 1.0 { dw } else { DEFAULT_DIGIT_WIDTH };
+    if mac_column_widths() {
+        // Excel for Mac: (width − 5 pt) ÷ digit, two decimals (158 pt of 6-pt digits: 25.5).
+        let (pt, d) = (px * 0.75, mac_digit_pt(dw));
+        return if pt <= d + 5.0 { (pt / (d + 5.0) * 100.0).round() / 100.0 } else { ((pt - 5.0) / d * 100.0).round() / 100.0 };
+    }
     let one = dw + 5.0;
     if px <= one { (px / one * 100.0).round() / 100.0 } else { ((px - 5.0) / dw * 100.0 + 0.5).trunc() / 100.0 }
 }
@@ -159,26 +206,55 @@ pub fn points_to_chars(px: f64, dw: f64) -> f64 {
 pub fn chars_to_points(c: f64, dw: f64) -> f64 {
     let dw = if dw.is_finite() && dw >= 1.0 { dw } else { DEFAULT_DIGIT_WIDTH };
     if c.is_nan() || c <= 0.0 {
-        0.0
-    } else if c < 1.0 {
-        (c * (dw + 5.0)).round()
-    } else {
-        (c * dw + 5.0).round()
+        return 0.0;
     }
+    if mac_column_widths() {
+        let d = mac_digit_pt(dw);
+        let pt = if c < 1.0 { (c * (d + 5.0)).round() } else { (c * d + 5.0).round() };
+        return pt * 4.0 / 3.0;
+    }
+    if c < 1.0 { (c * (dw + 5.0)).round() } else { (c * dw + 5.0).round() }
 }
 
 /// Default column width (points) of a sheet without one: `baseColWidth` 8 characters plus
-/// padding, rounded up to 8 px. 64 for a 7 px digit, 72 for 8 px.
+/// padding, rounded up to 8 px. 64 for a 7 px digit, 72 for 8 px. Excel for Mac: 8 digits plus
+/// 5 points, not rounded (53 pt for a 6-point digit).
 pub fn base_col_width(chars: f64, dw: f64) -> f32 {
     let dw = if dw.is_finite() && dw >= 1.0 { dw } else { DEFAULT_DIGIT_WIDTH };
+    if mac_column_widths() {
+        let d = mac_digit_pt(dw);
+        return ((chars.clamp(0.0, 255.0) * d + 5.0) * 4.0 / 3.0).min(f64::from(widest_col_width(dw))) as f32;
+    }
     // No wider than a file can store.
     (((chars.clamp(0.0, 255.0) * dw + 5.0) / 8.0).ceil() * 8.0).min(f64::from(widest_col_width(dw))) as f32
+}
+
+/// Stored column width (characters of the digit width `dw`, including padding) → width in
+/// 96-dpi pixels, by Excel for Mac's rule: `w` digits rounded to a point, halves down.
+pub fn mac_col_width_to_px(w: f64, dw: f64) -> f32 {
+    (mac_round(w * mac_digit_pt(dw)) * 4.0 / 3.0) as f32
+}
+
+/// Width in 96-dpi pixels → the stored column width Excel for Mac reads back as that many points.
+pub fn mac_px_to_col_width(px: f32, dw: f64) -> f64 {
+    let d = mac_digit_pt(dw);
+    let pt = (f64::from(px.max(0.0)) * 0.75).round().min(mac_round(255.0 * d));
+    // The smallest 1/256 step that rounds back to `pt` points.
+    let w = ((pt - 0.5) / d * 256.0).floor() / 256.0;
+    let mut w = w.max(0.0);
+    while mac_round(w * d) < pt && w < 255.0 {
+        w += 1.0 / 256.0;
+    }
+    w.min(255.0)
 }
 
 /// The widest column a file can store (points): 255 characters of the digit width `dw`, by
 /// Excel's stored-width formula. 1785 for a 7 px digit, 2040 for 8 px.
 pub fn widest_col_width(dw: f64) -> f32 {
     let dw = if dw.is_finite() && dw >= 1.0 { dw } else { DEFAULT_DIGIT_WIDTH };
+    if mac_column_widths() {
+        return mac_col_width_to_px(255.0, dw);
+    }
     (((256.0 * 255.0 + (128.0 / dw).trunc()) / 256.0) * dw).trunc() as f32
 }
 
@@ -671,5 +747,49 @@ mod picture_map {
     }
     pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<BTreeMap<CellRef, Arc<CellPicture>>, D::Error> {
         Ok(Vec::<(CellRef, Arc<CellPicture>)>::deserialize(deserializer)?.into_iter().collect())
+    }
+}
+
+#[cfg(test)]
+mod mac_width_tests {
+    use super::*;
+
+    /// Excel for Mac 16.114, observed with script-built workbooks (one Normal font each, columns
+    /// stored 1, 2.5, 5, 8.43, 10, 13.7, 20 and 30 characters wide, one column left at the
+    /// default): the widths in points Excel reported.
+    #[test]
+    fn mac_column_widths_match_excel_for_mac() {
+        let observed: [(&str, f32, [f64; 9]); 6] = [
+            ("Calibri", 10.0, [5.0, 12.0, 25.0, 42.0, 50.0, 68.0, 100.0, 150.0, 45.0]),
+            ("Calibri", 11.0, [6.0, 15.0, 30.0, 51.0, 60.0, 82.0, 120.0, 180.0, 53.0]),
+            ("Calibri", 14.0, [7.0, 17.0, 35.0, 59.0, 70.0, 96.0, 140.0, 210.0, 61.0]),
+            ("Arial", 12.0, [7.0, 17.0, 35.0, 59.0, 70.0, 96.0, 140.0, 210.0, 61.0]),
+            ("Century Schoolbook", 12.0, [7.0, 17.0, 35.0, 59.0, 70.0, 96.0, 140.0, 210.0, 61.0]),
+            ("Aptos Narrow", 11.0, [6.0, 15.0, 30.0, 51.0, 60.0, 82.0, 120.0, 180.0, 53.0]),
+        ];
+        let stored = [1.0, 2.5, 5.0, 8.43, 10.0, 13.7, 20.0, 30.0];
+        for (name, size, pts) in observed {
+            let font = crate::style::Font { name: name.into(), size, ..Default::default() };
+            let dw = digit_width_for(&font, true);
+            for (w, pt) in stored.iter().zip(pts) {
+                let got = f64::from(mac_col_width_to_px(*w, dw)) * 0.75;
+                assert!((got - pt).abs() < 1e-3, "{name} {size}: {w} characters: {got} pt, Excel {pt}");
+                // Written back, a width reads as the same number of points.
+                let back = mac_px_to_col_width(mac_col_width_to_px(*w, dw), dw);
+                assert_eq!(mac_col_width_to_px(back, dw), mac_col_width_to_px(*w, dw), "{name} {size}: {w} round trip");
+            }
+            // The default column: 8 digits plus 5 points.
+            let d = (dw * 0.75).round();
+            assert_eq!((8.0 * d + 5.0), pts[8], "{name} {size}: default width");
+        }
+    }
+
+    #[test]
+    fn windows_digit_widths_unchanged() {
+        let calibri = |size| crate::style::Font { name: "Calibri".into(), size, ..Default::default() };
+        assert_eq!(digit_width_for(&calibri(11.0), false), 7.0);
+        assert_eq!(digit_width_for(&calibri(12.0), false), 8.0);
+        assert_eq!(digit_width_for(&calibri(11.0), true), 8.0);
+        assert_eq!(digit_width_for(&calibri(10.0), true), 5.0 * 4.0 / 3.0);
     }
 }

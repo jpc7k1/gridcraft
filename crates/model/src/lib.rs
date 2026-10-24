@@ -21,7 +21,7 @@ pub use password::PasswordHash;
 pub use preserved::{Preserved, PreservedPart, PreservedRel, PreservedSheet, PreservedXml};
 pub use sheet::{
     DEFAULT_COL_WIDTH, DEFAULT_DIGIT_WIDTH, DEFAULT_ROW_HEIGHT, LineIndex, Sheet, SheetViewMode, Visibility, base_col_width, chars_to_points,
-    digit_width, points_to_chars, widest_col_width,
+    digit_width, mac_col_width_to_px, mac_column_widths, mac_px_to_col_width, points_to_chars, set_mac_column_widths, widest_col_width,
 };
 pub use store::CellStore;
 pub use style::{

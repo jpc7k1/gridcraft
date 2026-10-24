@@ -302,12 +302,18 @@ pub fn col_width_to_px(w: f64, dw: f64) -> f32 {
     }
     let dw = if dw.is_finite() && dw >= 1.0 { dw } else { gridcraft_model::DEFAULT_DIGIT_WIDTH };
     let w = w.min(255.0);
+    if gridcraft_model::mac_column_widths() {
+        return gridcraft_model::mac_col_width_to_px(w, dw);
+    }
     (((256.0 * w + (128.0 / dw).trunc()) / 256.0) * dw).trunc() as f32
 }
 
 /// Model width (px) → stored column width, in characters of the digit width `dw`.
 pub fn px_to_col_width(px: f32, dw: f64) -> f64 {
     let dw = if dw.is_finite() && dw >= 1.0 { dw } else { gridcraft_model::DEFAULT_DIGIT_WIDTH };
+    if gridcraft_model::mac_column_widths() {
+        return gridcraft_model::mac_px_to_col_width(px, dw);
+    }
     // The widest column a file can hold: 255 characters at this digit width.
     let px = (px.max(0.0) as f64).round().min(f64::from(col_width_to_px(255.0, dw)));
     let back = |w: f64| col_width_to_px(w, dw) as f64;

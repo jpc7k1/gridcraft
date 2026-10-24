@@ -9,6 +9,8 @@ use gridcraft_ui_egui::SheetApp;
 use serde_json::json;
 
 fn main() {
+    // Column widths as Excel for Mac draws them, on the Mac (as the desktop app).
+    gridcraft_engine::model::set_mac_column_widths(cfg!(target_os = "macos"));
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut sample = None;
     let mut input = None;

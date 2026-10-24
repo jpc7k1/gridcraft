@@ -232,6 +232,8 @@ fn icon() -> Option<egui::IconData> {
 fn main() -> eframe::Result<()> {
     // First, so the panic hook and every start-up warning are recorded (`logging`).
     let logger = logging::install();
+    // Column widths as Excel for Mac draws them, on the Mac.
+    gridcraft_engine::model::set_mac_column_widths(cfg!(target_os = "macos"));
     // Commands catch their panics (`Session::execute`), but the default hook only prints to
     // standard error; this one sends every panic, caught or not, to the log file too, with a
     // backtrace when RUST_BACKTRACE is set.
