@@ -1032,18 +1032,38 @@ fn wrap_shaped(
     size: f32,
     width: f32,
 ) -> std::result::Result<Vec<String>, String> {
+    // Word-wraps like Excel: lines break at spaces, and only a word (or a run of text without
+    // spaces, as Thai is written) wider than the cell breaks between grapheme clusters.
+    let fits = |s: &str| -> std::result::Result<bool, String> { Ok(shaped_width(catalog, family, bold, italic, s, size)? <= width) };
     let mut out = Vec::new();
     for paragraph in text.split('\n') {
         let mut line = String::new();
-        for (cluster_index, (_, cluster)) in gridcraft_pdf::text_clusters(paragraph).enumerate() {
-            if cluster_index >= 8192 {
-                return Err("wrapped PDF text line exceeds the 8,192-grapheme layout limit".to_string());
+        for (word_index, word) in paragraph.split(' ').enumerate() {
+            if word_index >= 8192 {
+                return Err("wrapped PDF text line exceeds the 8,192-word layout limit".to_string());
             }
-            let candidate = format!("{line}{cluster}");
-            if !line.is_empty() && shaped_width(catalog, family, bold, italic, &candidate, size)? > width {
+            let candidate = if line.is_empty() { word.to_string() } else { format!("{line} {word}") };
+            if line.is_empty() || fits(&candidate)? {
+                line = candidate;
+            } else {
                 out.push(std::mem::take(&mut line));
+                line = word.to_string();
             }
-            line.push_str(cluster);
+            // A word wider than the cell breaks between clusters.
+            if !fits(&line)? {
+                let mut piece = String::new();
+                for (cluster_index, (_, cluster)) in gridcraft_pdf::text_clusters(&std::mem::take(&mut line)).enumerate() {
+                    if cluster_index >= 8192 {
+                        return Err("wrapped PDF text line exceeds the 8,192-grapheme layout limit".to_string());
+                    }
+                    let candidate = format!("{piece}{cluster}");
+                    if !piece.is_empty() && !fits(&candidate)? {
+                        out.push(std::mem::take(&mut piece));
+                    }
+                    piece.push_str(cluster);
+                }
+                line = piece;
+            }
             if out.len() >= 2000 {
                 return Ok(out);
             }
@@ -2234,6 +2254,26 @@ mod tests {
             assert!((origin.1 - (25.0 + expected.1)).abs() < 0.001, "y at {degrees} degrees: {origin:?}");
         }
         assert_eq!(advance_text_baseline(12.0, 25.0, advance, f32::NAN), (92.0, 25.0));
+    }
+
+    /// Wrapped text breaks between words, as Excel does ("Regular / matrix", not "Regular mat /
+    /// rix"); only a word wider than the cell breaks inside, between grapheme clusters.
+    #[test]
+    fn wrapped_text_breaks_between_words() {
+        let catalog = FontCatalog::empty();
+        let w = |t: &str| shaped_width(&catalog, "Calibri", false, false, t, 11.0).unwrap();
+        // Room for "Regular" and a bit, not for "Regular matrix".
+        let width = w("Regular m") + 1.0;
+        let lines = wrap_shaped("Regular matrix", &catalog, "Calibri", false, false, 11.0, width).unwrap();
+        assert_eq!(lines, vec!["Regular".to_string(), "matrix".to_string()]);
+        let lines = wrap_shaped("10/22 - 10/28", &catalog, "Calibri", false, false, 11.0, w("10/22 - 10/") + 1.0).unwrap();
+        assert_eq!(lines, vec!["10/22 -".to_string(), "10/28".to_string()]);
+        // A single word too wide for the cell still breaks, and no text is lost.
+        let long = "Supercalifragilistic";
+        let lines = wrap_shaped(long, &catalog, "Calibri", false, false, 11.0, w("Supercal") + 1.0).unwrap();
+        assert!(lines.len() > 1 && lines.concat() == long, "{lines:?}");
+        // Paragraphs stay separate.
+        assert_eq!(wrap_shaped("a\nb", &catalog, "Calibri", false, false, 11.0, 200.0).unwrap(), vec!["a".to_string(), "b".to_string()]);
     }
 
     #[test]
